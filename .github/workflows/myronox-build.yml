@@ -18,6 +18,11 @@ on:
         description: Release tag to create (e.g. v1.0.0)
         type: string
         required: true
+      patch_file:
+        description: Optional exact patch file name in the repo root (leave empty to use the default name)
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -42,12 +47,19 @@ jobs:
       - name: Apply patch
         shell: bash
         run: |
-          if [ "${{ inputs.variant }}" = "ads-only" ]; then
+          if [ -n "${{ inputs.patch_file }}" ]; then
+            PATCH="${{ inputs.patch_file }}"
+          elif [ "${{ inputs.variant }}" = "ads-only" ]; then
             PATCH=1-ads-only.patch
           else
             PATCH=2-myronox-ads-plus-style.patch
           fi
-          test -f "$PATCH" || { echo "::error::$PATCH not found in repo root"; exit 1; }
+          echo "Using patch: $PATCH"
+          if [ ! -f "$PATCH" ]; then
+            echo "::error::$PATCH not found in repo root. Files here:"
+            ls -1 *.patch || true
+            exit 1
+          fi
           git apply --verbose "$PATCH"
           git status --short
 
