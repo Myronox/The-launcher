@@ -1,0 +1,133 @@
+name: MyroClient build (Windows)
+
+# Applies the patch(es) from the repo root, builds the Windows
+# installer on a normal GitHub runner (no signing, no secrets needed), and
+# attaches it to a DRAFT release that only you can see.
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: Which version to build
+        type: choice
+        options:
+          - ads-only
+          - myroclient
+          - myroclient-offline
+        default: myroclient
+      tag:
+        description: Release tag to create (e.g. v1.0.0)
+        type: string
+        required: true
+      patch_file:
+        description: Optional exact patch file name(s) in the repo root, space-separated, applied in order (leave empty to use the default names)
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: myroclient-build
+  cancel-in-progress: false
+
+env:
+  TURBO_TELEMETRY_DISABLED: 1
+
+jobs:
+  build:
+    name: Build ${{ inputs.variant }}
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Apply patch
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.patch_file }}" ]; then
+            PATCHES="${{ inputs.patch_file }}"
+          elif [ "${{ inputs.variant }}" = "ads-only" ]; then
+            PATCHES="1-ads-only.patch"
+          elif [ "${{ inputs.variant }}" = "myroclient-offline" ]; then
+            PATCHES="2-myroclient-ads-plus-style.patch 3-offline-accounts.patch"
+          else
+            PATCHES="2-myroclient-ads-plus-style.patch"
+          fi
+          echo "Patches to apply, in order: $PATCHES"
+          for PATCH in $PATCHES; do
+            if [ ! -f "$PATCH" ]; then
+              echo "::error::$PATCH not found in repo root. Files here:"
+              ls -1 *.patch || true
+              exit 1
+            fi
+          done
+          for PATCH in $PATCHES; do
+            echo "Applying $PATCH"
+            git apply --verbose "$PATCH"
+          done
+          git status --short
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          rustflags: ''
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Enable Corepack
+        shell: bash
+        run: corepack enable
+
+      - name: Setup Java
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Use production environment
+        shell: bash
+        run: cp packages/app-lib/.env.prod packages/app-lib/.env
+
+      - name: Install dependencies
+        shell: bash
+        run: pnpm install
+
+      - name: Build Windows installer
+        shell: bash
+        run: pnpm --filter=@modrinth/app run tauri build --verbose --bundles nsis
+
+      - name: Collect installer
+        id: collect
+        shell: bash
+        run: |
+          mkdir -p dist
+          f=$(ls target/release/bundle/nsis/*-setup.exe | head -n 1)
+          test -n "$f" || { echo "::error::installer not found"; exit 1; }
+          out="dist/MyroClient-${{ inputs.variant }}-${{ inputs.tag }}-setup.exe"
+          cp "$f" "$out"
+          echo "file=$out" >> "$GITHUB_OUTPUT"
+          ls -la dist
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: installer-${{ inputs.variant }}
+          path: dist/*.exe
+
+      - name: Create draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ inputs.tag }}" "${{ steps.collect.outputs.file }}" \
+            --draft \
+            --target "${{ github.sha }}" \
+            --title "MyroClient ${{ inputs.tag }} (${{ inputs.variant }})" \
+            --notes "Unofficial personal build of the Modrinth App source (GPL-3.0). Unsigned: Windows SmartScreen will warn."
